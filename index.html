@@ -428,6 +428,16 @@ html,body{height:100%;overflow:hidden;font-family:'DM Sans',sans-serif;color:var
 /* ── TOAST ── */
 #toast{position:fixed;bottom:calc(var(--nav) + 14px);left:50%;transform:translateX(-50%) translateY(16px);background:var(--brown2);color:var(--warm);border-radius:11px;padding:9px 18px;font-size:.83rem;font-weight:600;opacity:0;transition:all .3s;pointer-events:none;z-index:500;white-space:nowrap}
 #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ── SYNC BANNER ── */
+#sync-banner{display:none;align-items:center;gap:10px;padding:10px 16px;background:linear-gradient(135deg,#fef0d0,#f5e0b8);border-bottom:1.5px solid var(--warm2);cursor:pointer;transition:all .15s;animation:fadeIn .3s both}
+#sync-banner.on{display:flex}
+#sync-banner:active{background:var(--warm)}
+.sync-icon{font-size:1.2rem;flex-shrink:0;animation:syncpulse 2s infinite}
+@keyframes syncpulse{0%,100%{opacity:1}50%{opacity:.5}}
+.sync-text{flex:1;font-size:.82rem;color:var(--brown);line-height:1.35}
+.sync-text strong{display:block;font-size:.85rem;margin-bottom:1px}
+.sync-close{background:none;border:none;color:var(--lb);font-size:.95rem;cursor:pointer;padding:4px;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -443,6 +453,11 @@ html,body{height:100%;overflow:hidden;font-family:'DM Sans',sans-serif;color:var
 
     <!-- HOME -->
     <div class="screen on" id="s-home">
+      <div id="sync-banner" onclick="applySyncData()">
+        <span class="sync-icon">🔄</span>
+        <div class="sync-text"><strong>Mise à jour disponible</strong><span id="sync-detail">De nouvelles recettes sont disponibles</span></div>
+        <button class="sync-close" onclick="event.stopPropagation();dismissSync()">✕</button>
+      </div>
       <div class="top" style="padding:13px 16px 0">
         <div class="s-inner"><span class="s-icon">🔍</span><input id="hs" placeholder="Recette, ingrédient, tag…" oninput="renderHome()"></div>
       </div>
@@ -1525,7 +1540,7 @@ async function saveQuick(){
 // ════════════════════════════════════════
 function exportData(){
   const blob=new Blob([JSON.stringify({schemaVersion:SCHEMA_V,exportedAt:new Date().toISOString(),count:recipes.length,recipes},null,2)],{type:'application/json'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`mes-recettes-${new Date().toISOString().slice(0,10)}.json`; a.click();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='mes-donnees.json'; a.click();
   toast(`${recipes.length} recette${recipes.length>1?'s':''} exportée${recipes.length>1?'s':''} ✓`);
 }
 async function importData(e){
@@ -1561,6 +1576,105 @@ function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 function fmtN(n){return parseFloat(n.toFixed(2)).toString();}
 
 // ════════════════════════════════════════
+// SYNC — Load/update from mes-donnees.json on GitHub
+// ════════════════════════════════════════
+const SEED_FILE = './mes-donnees.json';
+let pendingSyncData = null;
+
+async function fetchSeedData(){
+  try{
+    const res = await fetch(SEED_FILE, {cache:'no-cache'});
+    if(!res.ok) return null;
+    const data = await res.json();
+    return Array.isArray(data) ? data : (data.recipes || []);
+  }catch(e){ return null; }
+}
+
+function getSeedHash(list){
+  // Simple hash based on count + newest updatedAt to detect changes
+  const newest = list.reduce((m,r)=>Math.max(m,r.updatedAt||0,r.createdAt||0),0);
+  return `${list.length}_${newest}`;
+}
+
+function showSyncBanner(added, updated){
+  const parts=[];
+  if(added>0) parts.push(`${added} nouvelle${added>1?'s':''}`);
+  if(updated>0) parts.push(`${updated} mise${updated>1?'s':''} à jour`);
+  document.getElementById('sync-detail').textContent=parts.join(', ');
+  document.getElementById('sync-banner').classList.add('on');
+}
+
+function dismissSync(){
+  document.getElementById('sync-banner').classList.remove('on');
+  pendingSyncData=null;
+  // Remember this version was dismissed
+  const hash=localStorage.getItem('sync_pending_hash');
+  if(hash) localStorage.setItem('sync_dismissed',hash);
+}
+
+async function applySyncData(){
+  if(!pendingSyncData) return;
+  let added=0, updated=0;
+  for(const r of pendingSyncData.map(migrate)){
+    const ex=recipes.find(x=>x.id===r.id);
+    if(ex){
+      // Only update if remote is newer
+      if((r.updatedAt||0)>(ex.updatedAt||0)){updated++;await dbPut(r);}
+    }else{
+      added++;await dbPut(r);
+    }
+  }
+  recipes=await dbAll();
+  const hash=getSeedHash(pendingSyncData);
+  localStorage.setItem('sync_hash',hash);
+  localStorage.removeItem('sync_dismissed');
+  localStorage.removeItem('sync_pending_hash');
+  pendingSyncData=null;
+  document.getElementById('sync-banner').classList.remove('on');
+  buildFilters(); renderHome();
+  toast(`Synchronisé : ${added} ajoutée${added>1?'s':''}, ${updated} mise${updated>1?'s':''} à jour ✓`);
+}
+
+async function checkForUpdates(){
+  const seedList = await fetchSeedData();
+  if(!seedList || !seedList.length) return;
+
+  if(!recipes.length){
+    // First launch — silent auto-import
+    for(const r of seedList.map(migrate)) await dbPut(r);
+    recipes=await dbAll();
+    const hash=getSeedHash(seedList);
+    localStorage.setItem('sync_hash',hash);
+    buildFilters(); renderHome();
+    toast(`${recipes.length} recette${recipes.length>1?'s':''} chargée${recipes.length>1?'s':''} ✓`);
+    return;
+  }
+
+  // Existing data — check if remote changed since last sync
+  const newHash=getSeedHash(seedList);
+  const lastHash=localStorage.getItem('sync_hash')||'';
+  const dismissed=localStorage.getItem('sync_dismissed')||'';
+  if(newHash===lastHash || newHash===dismissed) return;
+
+  // Count what would change
+  let added=0, updated=0;
+  for(const r of seedList.map(migrate)){
+    const ex=recipes.find(x=>x.id===r.id);
+    if(!ex) added++;
+    else if((r.updatedAt||0)>(ex.updatedAt||0)) updated++;
+  }
+  if(added===0 && updated===0){
+    localStorage.setItem('sync_hash',newHash);
+    return;
+  }
+
+  // Show banner
+  pendingSyncData=seedList;
+  localStorage.setItem('sync_pending_hash',newHash);
+  showSyncBanner(added, updated);
+}
+
+// ════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════
 async function init(){
@@ -1571,15 +1685,9 @@ async function init(){
     document.getElementById('grid').innerHTML='<div class="empty-grid"><div class="ei">⚠️</div><p>Impossible d\'accéder au stockage local.<br>Vérifiez que la navigation privée est désactivée ou essayez un autre navigateur.</p></div>';
     return;
   }
-  if(!recipes.length){
-    const seeds=[
-      {id:uid(),schemaVersion:1,name:'Quiche Lorraine',category:'Plat',servings:'6',prep:'15 min',cook:'35 min',difficulty:'Facile',season:'Hiver',tags:['salé','four'],ingredients:[{qty:'1',unit:'',name:'pâte brisée'},{qty:'200',unit:'g',name:'lardons'},{qty:'3',unit:'pièce',name:'œufs'},{qty:'20',unit:'cl',name:'crème fraîche'},{qty:'20',unit:'cl',name:'lait'},{qty:'',unit:'qs',name:'sel, poivre, muscade'}],steps:['Préchauffer le four à 180°C.','Étaler la pâte dans un moule.','Faire revenir les lardons à la poêle.','Mélanger les œufs, crème et lait. Assaisonner.','Verser les lardons sur la pâte puis la préparation.','Enfourner 35 min jusqu\'à coloration dorée.'],notes:'Peut se manger froide. Se conserve 3 jours.',photo:null,rating:0,cookHistory:[],updatedAt:Date.now()-1000,createdAt:Date.now()-1000},
-      {id:uid(),schemaVersion:1,name:'Fondant au chocolat',category:'Dessert',servings:'4',prep:'10 min',cook:'12 min',difficulty:'Facile',season:'Hiver',tags:['chocolat','rapide'],ingredients:[{qty:'200',unit:'g',name:'chocolat noir'},{qty:'150',unit:'g',name:'beurre'},{qty:'3',unit:'pièce',name:'œufs'},{qty:'100',unit:'g',name:'sucre'},{qty:'50',unit:'g',name:'farine'}],steps:['Faire fondre le chocolat avec le beurre au bain-marie.','Fouetter les œufs et le sucre jusqu\'au blanchiment.','Incorporer le chocolat fondu refroidi.','Ajouter la farine et mélanger doucement.','Verser dans des ramequins beurrés.','Cuire 12 min à 200°C — le cœur doit trembler.'],notes:'Le secret : sortir quand le centre tremble encore.',photo:null,rating:5,cookHistory:[Date.now()-7*86400000],updatedAt:Date.now(),createdAt:Date.now()},
-    ];
-    for(const s of seeds)await dbPut(s);
-    recipes=await dbAll();
-  }
   buildFilters(); renderHome();
+  // Check for seed/sync data (non-blocking)
+  checkForUpdates();
 }
 
 // CSS animation keyframes (injected once)
