@@ -1,0 +1,17 @@
+{
+  "name": "Mes Recettes",
+  "short_name": "Recettes",
+  "description": "Mon carnet de recettes personnel",
+  "start_url": "./mes-recettes.html",
+  "display": "standalone",
+  "background_color": "#fdf6ec",
+  "theme_color": "#5c3d1e",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
